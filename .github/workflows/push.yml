@@ -1,0 +1,32 @@
+name: Clawback request push
+
+# Free push delivery for paw/smack/clawback requests. GitHub cron is best-effort
+# (can run a few min late; scheduled workflows auto-pause after 60 days of repo
+# inactivity — any commit re-arms them). Requests happen any time, so this runs
+# all day, every day. Times are UTC.
+on:
+  schedule:
+    - cron: '*/15 * * * *'   # every 15 minutes
+  workflow_dispatch: {}      # "Run workflow" button for manual/test runs
+
+concurrency:
+  group: clawback-push
+  cancel-in-progress: false
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install deps
+        run: npm ci || npm install
+      - name: Send request pushes
+        env:
+          # Paste the clawback-app service-account JSON (one line) into this repo
+          # secret: Settings → Secrets and variables → Actions → New secret.
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: node scan.js
