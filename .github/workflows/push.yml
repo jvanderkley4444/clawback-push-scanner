@@ -1,12 +1,17 @@
-name: Clawback request push
+name: Clawback push (requests + reminders)
 
-# Free push delivery for paw/smack/clawback requests. GitHub cron is best-effort
-# (can run a few min late; scheduled workflows auto-pause after 60 days of repo
-# inactivity — any commit re-arms them). Requests happen any time, so this runs
-# all day, every day. Times are UTC.
+# Free push delivery for paw/smack/clawback requests AND "you owe $X" reminders.
+# GitHub cron is best-effort (can run a few min late; scheduled workflows auto-pause
+# after 60 days of repo inactivity — any commit re-arms them). Times are UTC.
+#
+# COST (private repo): GitHub gives 2,000 free Action-minutes/month. Every 30 min =
+# 48 runs/day ≈ 1,440/month; with the npm cache below each run is well under a minute,
+# so this stays comfortably inside the free tier. Firebase stays $0 (Spark + FCM, no
+# Cloud Functions). If you ever want snappier Tap pings, make the repo public (Actions
+# are unlimited for public repos) and drop the cron back to */15.
 on:
   schedule:
-    - cron: '*/15 * * * *'   # every 15 minutes
+    - cron: '*/30 * * * *'   # every 30 minutes (private-repo friendly)
   workflow_dispatch: {}      # "Run workflow" button for manual/test runs
 
 concurrency:
@@ -16,14 +21,15 @@ concurrency:
 jobs:
   push:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'          # cache ~/.npm so installs are fast → fewer billed minutes
       - name: Install deps
-        run: npm ci || npm install
+        run: npm ci --prefer-offline --no-audit --no-fund || npm install --no-audit --no-fund
       - name: Send request pushes
         env:
           # Paste the clawback-2443f service-account JSON (one line) into this repo
