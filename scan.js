@@ -63,6 +63,29 @@ function eventsForTrip(state) {
   return out;
 }
 
+// "You owe $X" reminders. Reads the compact debtor list the APP writes into
+// state.reminders ({cur, debts:[{uid,name,amt}]}) — the app owns the split math, so we
+// just push. Pure + exported for tests. Rate-limiting happens in main() (remindState).
+function reminderEventsForTrip(state) {
+  const rem = (state && state.reminders) || {};
+  const debts = rem.debts || [];
+  const cur = rem.cur || (state && state.trip && state.trip.currency) || '';
+  const tripName = (state && state.trip && state.trip.name) || 'your group';
+  const min = Number(process.env.REMIND_MIN) || 1;
+  const out = [];
+  for (const d of debts) {
+    if (!d || !d.uid) continue;
+    const amt = Number(d.amt) || 0;
+    if (amt < min) continue;                            // ignore trivial balances
+    out.push({
+      uid: d.uid, amt, kind: 'clawback-reminder', reqId: 'remind',
+      title: `💸 You owe ${money(cur, amt)} in ${tripName}`,
+      body: 'Open Clawback to settle up.'
+    });
+  }
+  return out;
+}
+
 async function sendToUser(db, messaging, uid, ev) {
   const userSnap = await db.collection('users').doc(uid).get();
   const u = userSnap.exists ? (userSnap.data() || {}) : {};
@@ -72,7 +95,7 @@ async function sendToUser(db, messaging, uid, ev) {
     tokens,
     notification: { title: ev.title, body: ev.body },
     apns: { payload: { aps: { sound: 'default', badge: 1 } } },
-    data: { reqId: ev.reqId, kind: 'clawback-request' }
+    data: { reqId: ev.reqId, kind: ev.kind || 'clawback-request' }
   });
   // prune dead tokens
   const dead = {};
@@ -105,10 +128,35 @@ async function main() {
       // if !ok (no tokens), leave unrecorded so it retries once they register
     }
   }
-  console.log(`Done. ${candidates} open request(s) with a reachable target; pushed ${pushed} new notification(s).`);
+  console.log(`Requests: ${candidates} open with a reachable target; pushed ${pushed} new.`);
+
+  // ── "You owe $X" reminders ──────────────────────────────────────────────
+  // Nudge anyone who still owes, at most once per REMIND_DAYS (default 3), and only
+  // during the daily window REMIND_HOUR (UTC) so pushes never land at 3am. The cron runs
+  // every 15 min for timely Tap pings; this self-rate-limits so it can share that cadence.
+  const REMIND_MS = (Number(process.env.REMIND_DAYS) || 3) * 86400000;
+  const remindHour = process.env.REMIND_HOUR;
+  const inWindow = (remindHour === undefined || remindHour === '') ? true : (new Date(now).getUTCHours() === Number(remindHour));
+  let reminded = 0, owers = 0;
+  if (inWindow) {
+    for (const doc of trips.docs) {
+      const state = (doc.data() || {}).state || {};
+      for (const ev of reminderEventsForTrip(state)) {
+        owers++;
+        const rsRef = db.collection('remindState').doc(doc.id + '_' + ev.uid);
+        const prev = await rsRef.get();
+        if (prev.exists && (now - (prev.data().lastAt || 0)) < REMIND_MS) continue;   // reminded recently
+        const ok = await sendToUser(db, messaging, ev.uid, ev);
+        if (ok) { await rsRef.set({ lastAt: now, amt: ev.amt, tripId: doc.id, uid: ev.uid }); reminded++; }
+      }
+    }
+    console.log(`Reminders: ${owers} reachable ower(s); pushed ${reminded} new nudge(s).`);
+  } else {
+    console.log(`Reminders: outside the daily window (REMIND_HOUR=${remindHour} UTC) — skipped.`);
+  }
 }
 
-module.exports = { eventsForTrip, displayName, targetUid, main };
+module.exports = { eventsForTrip, reminderEventsForTrip, displayName, targetUid, main };
 
 if (require.main === module) {
   main().then(() => process.exit(0)).catch(err => { console.error('SCAN FAILED:', err); process.exit(1); });

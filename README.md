@@ -1,27 +1,42 @@
-# Clawback — Request Push Poller
+# Clawback — Push Scanner (requests + "you owe" reminders)
 
-Sends an FCM push for **paw 🐾 / smack 🐱 / clawback 💢** money requests, so the
-person being asked gets nudged **even when the app is closed** — on the **free**
-stack (GitHub Actions cron + Firebase Admin + FCM, no Blaze plan). Best-effort
-timing: the cron runs ~every 15 minutes.
+Two free, app-closed nudges on the **free** stack (GitHub Actions cron + Firebase
+Admin SDK + FCM — **no Cloud Functions, no Blaze plan, no Firebase cost**):
+
+1. **Request pushes** — a paw 🐾 / smack 🐱 / clawback 💢 money request pings the
+   debtor right away (next run, ~15 min).
+2. **"You owe $X" reminders** — anyone who still owes gets a gentle daily-window
+   nudge, at most once per group every few days, so balances don't go stale. *(This
+   is Splitwise's core retention loop — now matched at $0 cost.)*
 
 ## How it works
 ```
 GitHub Actions cron (every ~15m)
-  → read every trips/{tripId}.state.requests  (Admin SDK)
-  → for each OPEN request: members.find(toMember).linkedUid → users/{uid}.fcmTokens
-  → send FCM push  (dedupe per requestId+level via pushState/{key})
-  → 📱 push arrives even if the app is closed
+  → read every trips/{tripId}.state   (Admin SDK; project clawback-2443f)
+  Requests:  state.requests (open) → members.find(toMember).linkedUid → users/{uid}.fcmTokens
+             → FCM push   (dedupe per requestId+level via pushState/{key})
+  Reminders: state.reminders.debts  (the APP writes this: {uid,name,amt} per ower)
+             → FCM "💸 You owe $X in <group>"   (rate-limited via remindState/{tripId}_{uid})
+  → 📱 arrives even if the app is closed
 ```
-- Only **claimed** members (with a `linkedUid`) can be notified — a request to an
-  unclaimed participant is skipped (they'll see it in-app when they open Clawback).
-- Each escalation is its own push: a *tap* notifies once, a later *smack* and
-  *clawback* each notify again (keyed `requestId_L{level}`).
-- The poller never writes into the trip blob (the app owns that); it records sent
-  pushes in its own `pushState` collection.
+- The **app owns the split math** and writes a compact `state.reminders` (only
+  reachable debtors with a linked account); the scanner just reads it and pushes —
+  so reminder amounts always match what the app shows, with no math to keep in sync.
+- Only **claimed** members (a `linkedUid`) can be reached; unclaimed are skipped.
+- The scanner never writes into the trip blob — it records sent pushes in its own
+  `pushState` / `remindState` collections (idempotent, free-tier writes).
+
+## Tuning (workflow `env:`)
+| var | default | meaning |
+|-----|---------|---------|
+| `REMIND_HOUR` | `17` | only send "you owe" reminders in this **UTC hour** (≈ noon ET / 9am PT) so pushes never land overnight. Blank = any hour. |
+| `REMIND_DAYS` | `3` | at most one reminder per person per group every N days. |
+| `REMIND_MIN` | `1` | ignore balances below this amount. |
+
+Request pushes ignore these — they go out every run.
 
 ## Files
-`scan.js` (poller) · `package.json` · `.github/workflows/push.yml` (cron) · this README.
+`scan.js` (scanner) · `package.json` · `.github/workflows/push.yml` (cron) · this README.
 
 ---
 

@@ -26,7 +26,12 @@ jobs:
         run: npm ci || npm install
       - name: Send request pushes
         env:
-          # Paste the clawback-app service-account JSON (one line) into this repo
+          # Paste the clawback-2443f service-account JSON (one line) into this repo
           # secret: Settings → Secrets and variables → Actions → New secret.
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          # "You owe $X" reminders: only fire in this UTC hour (≈ noon ET / 9am PT) so
+          # nudges never arrive overnight, and at most once per person per group per N days.
+          # Tap/smack/clawback request pushes are unaffected — they go out every run.
+          REMIND_HOUR: '17'
+          REMIND_DAYS: '3'
         run: node scan.js
