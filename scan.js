@@ -97,15 +97,26 @@ async function sendToUser(db, messaging, uid, ev) {
     apns: { payload: { aps: { sound: 'default', badge: 1 } } },
     data: { reqId: ev.reqId, kind: ev.kind || 'clawback-request' }
   });
-  // prune dead tokens
-  const dead = {};
+  // prune dead tokens (2026-07 fixes, ported from StockAlertScanner):
+  //  (A) key ONLY on token-specific codes. 'invalid-argument' was removed — FCM
+  //      also returns it for a malformed MESSAGE, so one bad payload would have
+  //      wiped every healthy token for every user. Log other errors instead.
+  //  (B) delete via FieldPath('fcmTokens', token), NOT the string
+  //      `'fcmTokens.' + token`: FCM tokens contain ':' and '/', which are
+  //      illegal in a string field path, so update() threw into the silent
+  //      catch below and pruning NEVER actually worked.
+  const deadPaths = [];
   res.responses.forEach((r, i) => {
     if (!r.success && r.error) {
       const code = r.error.code || '';
-      if (code.includes('registration-token-not-registered') || code.includes('invalid-argument')) dead['fcmTokens.' + tokens[i]] = admin.firestore.FieldValue.delete();
+      if (code.includes('registration-token-not-registered') || code.includes('invalid-registration-token')) {
+        deadPaths.push(new admin.firestore.FieldPath('fcmTokens', tokens[i]), admin.firestore.FieldValue.delete());
+      } else {
+        console.warn(`send error for ${uid} token[${i}]: ${code}`);
+      }
     }
   });
-  if (Object.keys(dead).length) await db.collection('users').doc(uid).update(dead).catch(() => {});
+  if (deadPaths.length) await db.collection('users').doc(uid).update(deadPaths[0], deadPaths[1], ...deadPaths.slice(2)).catch(() => {});
   return res.successCount > 0;
 }
 
