@@ -89,6 +89,10 @@ function reminderEventsForTrip(state) {
 async function sendToUser(db, messaging, uid, ev) {
   const userSnap = await db.collection('users').doc(uid).get();
   const u = userSnap.exists ? (userSnap.data() || {}) : {};
+  // Notification opt-out: the app mirrors the Settings toggle to users/{uid}.notify.muted.
+  // A muted user gets no request nudges OR debt reminders. Returning false (rather than
+  // recording pushState) means an un-mute resumes any still-open nudge on the next run.
+  if (u.notify && u.notify.muted === true) return false;
   const tokens = u.fcmTokens ? Object.keys(u.fcmTokens) : [];
   if (!tokens.length) return false;                    // not registered for push yet → retry next run
   const res = await messaging.sendEachForMulticast({
@@ -167,7 +171,7 @@ async function main() {
   }
 }
 
-module.exports = { eventsForTrip, reminderEventsForTrip, displayName, targetUid, main };
+module.exports = { eventsForTrip, reminderEventsForTrip, displayName, targetUid, sendToUser, main };
 
 if (require.main === module) {
   main().then(() => process.exit(0)).catch(err => { console.error('SCAN FAILED:', err); process.exit(1); });
