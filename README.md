@@ -17,8 +17,15 @@ GitHub Actions cron (every ~15m)
              → FCM push   (dedupe per requestId+level via pushState/{key})
   Reminders: state.reminders.debts  (the APP writes this: {uid,name,amt} per ower)
              → FCM "💸 You owe $X in <group>"   (rate-limited via remindState/{tripId}_{uid})
+  Activity:  state.activity entries with a byUid stamp (app 2026-07-28+) and kind
+             expense/income/payment/settle → FCM "🧾 Alex · Weekend Getaway — Added …"
+             to every OTHER claimed member (dedupe per entry+recipient via pushState/act_*;
+             "-edit" kinds and legacy entries without byUid are never pushed)
   → 📱 arrives even if the app is closed
 ```
+- **Per-category opt-outs**: the app mirrors Settings → Notifications to
+  `users/{uid}.notify` = `{muted, requests, activity, reminders}`. `muted:true`
+  silences everything; a category `false` silences just that class. Absent = ON.
 - The **app owns the split math** and writes a compact `state.reminders` (only
   reachable debtors with a linked account); the scanner just reads it and pushes —
   so reminder amounts always match what the app shows, with no math to keep in sync.
@@ -32,8 +39,9 @@ GitHub Actions cron (every ~15m)
 | `REMIND_HOUR` | `17` | only send "you owe" reminders in this **UTC hour** (≈ noon ET / 9am PT) so pushes never land overnight. Blank = any hour. |
 | `REMIND_DAYS` | `3` | at most one reminder per person per group every N days. |
 | `REMIND_MIN` | `1` | ignore balances below this amount. |
+| `ACT_WINDOW_HOURS` | `48` | how far back an activity entry may be and still push (pushState dedupes inside the window). |
 
-Request pushes ignore these — they go out every run.
+Request + activity pushes ignore the reminder windows — they go out every run.
 
 ## Files
 `scan.js` (scanner) · `package.json` · `.github/workflows/push.yml` (cron) · this README.

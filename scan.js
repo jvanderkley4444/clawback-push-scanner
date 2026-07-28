@@ -56,9 +56,41 @@ function eventsForTrip(state) {
       uid,
       reqId: r.id,
       level,
+      pref: 'requests',                                // per-category opt-out key on users/{uid}.notify
       title: `${lv.emoji} ${displayName(members, r.fromMember)} ${lv.line} ${money(r.currency, r.amount)}`,
       body: (r.note ? r.note + ' · ' : '') + 'Open Clawback to settle up.'
     });
+  }
+  return out;
+}
+
+// Activity pushes ("Alex added Dinner CA$80") from the trip's synced activity log.
+// The app stamps each entry with the ACTOR's uid (byUid, 2026-07-28+); recipients are
+// every OTHER claimed member. Entries without byUid (legacy) are skipped — that also
+// means the first scan after this deploys pushes nothing historical. `since` bounds
+// the window so a pruned pushState collection can never replay old entries.
+const ACTIVITY_KINDS = { expense: '🧾', income: '💵', payment: '💸', settle: '✅' };
+function activityEventsForTrip(state, sinceMs) {
+  const acts = (state && state.activity) || [];
+  const members = (state && state.members) || [];
+  const tripName = (state && state.trip && state.trip.name) || 'your group';
+  const out = [];
+  for (const a of acts) {
+    if (!a || !a.id || !a.byUid || !ACTIVITY_KINDS[a.kind]) continue;
+    const at = Date.parse(a.at || '');
+    if (!isFinite(at) || at < sinceMs) continue;
+    for (const m of members) {
+      if (!m || !m.linkedUid || m.linkedUid === a.byUid) continue;   // unreachable, or the actor
+      out.push({
+        key: 'act_' + a.id + '_' + m.linkedUid,        // one push per entry per recipient
+        uid: m.linkedUid,
+        reqId: a.id,
+        kind: 'clawback-activity',
+        pref: 'activity',
+        title: `${ACTIVITY_KINDS[a.kind]} ${a.who || 'Someone'} · ${tripName}`,
+        body: String(a.summary || 'made a change') + ' · Open Clawback to see it.'
+      });
+    }
   }
   return out;
 }
@@ -78,7 +110,7 @@ function reminderEventsForTrip(state) {
     const amt = Number(d.amt) || 0;
     if (amt < min) continue;                            // ignore trivial balances
     out.push({
-      uid: d.uid, amt, kind: 'clawback-reminder', reqId: 'remind',
+      uid: d.uid, amt, kind: 'clawback-reminder', reqId: 'remind', pref: 'reminders',
       title: `💸 You owe ${money(cur, amt)} in ${tripName}`,
       body: 'Open Clawback to settle up.'
     });
@@ -93,6 +125,9 @@ async function sendToUser(db, messaging, uid, ev) {
   // A muted user gets no request nudges OR debt reminders. Returning false (rather than
   // recording pushState) means an un-mute resumes any still-open nudge on the next run.
   if (u.notify && u.notify.muted === true) return false;
+  // Per-category opt-out (users/{uid}.notify.requests|activity|reminders, mirrored from
+  // Settings → Notifications). Absent key = ON; only an explicit false silences the class.
+  if (ev.pref && u.notify && u.notify[ev.pref] === false) return false;
   const tokens = u.fcmTokens ? Object.keys(u.fcmTokens) : [];
   if (!tokens.length) return false;                    // not registered for push yet → retry next run
   const res = await messaging.sendEachForMulticast({
@@ -145,6 +180,26 @@ async function main() {
   }
   console.log(`Requests: ${candidates} open with a reachable target; pushed ${pushed} new.`);
 
+  // ── Activity pushes ("X added Dinner $80") ──────────────────────────────
+  // Window = 2× the poll cadence would be too tight for a slow/failed run; 48h is
+  // safe because pushState dedupes per entry+recipient — the window only caps how
+  // far back a BRAND-NEW recipient (or wiped pushState) could be spammed.
+  const ACT_WINDOW_MS = (Number(process.env.ACT_WINDOW_HOURS) || 48) * 3600000;
+  let actPushed = 0, actCandidates = 0;
+  for (const doc of trips.docs) {
+    const state = (doc.data() || {}).state || {};
+    for (const ev of activityEventsForTrip(state, now - ACT_WINDOW_MS)) {
+      actCandidates++;
+      const psRef = db.collection('pushState').doc(ev.key);
+      if ((await psRef.get()).exists) continue;          // this recipient already got this entry
+      const ok = await sendToUser(db, messaging, ev.uid, ev);
+      if (ok) { await psRef.set({ sentAt: now, actId: ev.reqId, tripId: doc.id, uid: ev.uid }); actPushed++; }
+      // if !ok (no tokens / muted / activity off), leave unrecorded — an un-mute within
+      // the window resumes; after the window it ages out naturally.
+    }
+  }
+  console.log(`Activity: ${actCandidates} candidate deliveries; pushed ${actPushed} new.`);
+
   // ── "You owe $X" reminders ──────────────────────────────────────────────
   // Nudge anyone who still owes, at most once per REMIND_DAYS (default 3), and only
   // during the daily window REMIND_HOUR (UTC) so pushes never land at 3am. The cron runs
@@ -171,7 +226,7 @@ async function main() {
   }
 }
 
-module.exports = { eventsForTrip, reminderEventsForTrip, displayName, targetUid, sendToUser, main };
+module.exports = { eventsForTrip, reminderEventsForTrip, activityEventsForTrip, displayName, targetUid, sendToUser, main };
 
 if (require.main === module) {
   main().then(() => process.exit(0)).catch(err => { console.error('SCAN FAILED:', err); process.exit(1); });
