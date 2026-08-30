@@ -59,14 +59,13 @@ jobs:
           REMIND_HOUR: '17'
           REMIND_DAYS: '3'
         run: |
-          # Keep the free Render dyno warm from a job that is ALREADY running,
-          # instead of a standalone keep-warm workflow. GitHub bills every job
-          # rounded up to a whole minute, so an 8-second curl on its own cron
-          # cost a full minute each time — ~516 min in August alone, which is
-          # what exhausted the account's 2,000 free minutes and killed every
-          # scheduled job on the account. Here it is free.
-          # -m 5 is deliberate: Render starts the instance as soon as the request
-          # reaches its router, so there is no need to wait for the response body
-          # (and no risk of tipping this job over the 60-second billing boundary).
-          curl -m 5 -fsS "${ORCHESTRATOR_URL:-https://clawback-ai-orchestrator.onrender.com}/healthz" -o /dev/null || true
+          # NOTE (2026-08-30): the keep-warm ping that used to live here is gone.
+          # It returned 404, and a grep of the Clawback client (apps/Tripwise) shows
+          # nothing ever calls clawback-ai-orchestrator — only the server/ directory
+          # references it. The standalone keep-warm cron that pinged it every 13 min
+          # was therefore burning ~516 billed minutes a month warming a service no
+          # user code talks to, and was a major contributor to the account hitting
+          # its Actions cap on 25 Aug. If the orchestrator is ever wired into the
+          # app, warm it from the CLIENT on launch/foreground (see CookwithFriends'
+          # warmAIKitchen) rather than from a cron — free, and better targeted.
           node scan.js
