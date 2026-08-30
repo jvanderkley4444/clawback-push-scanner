@@ -40,4 +40,15 @@ jobs:
           # Tap/smack/clawback request pushes are unaffected — they go out every run.
           REMIND_HOUR: '17'
           REMIND_DAYS: '3'
-        run: node scan.js
+        run: |
+          # Keep the free Render dyno warm from a job that is ALREADY running,
+          # instead of a standalone keep-warm workflow. GitHub bills every job
+          # rounded up to a whole minute, so an 8-second curl on its own cron
+          # cost a full minute each time — ~516 min in August alone, which is
+          # what exhausted the account's 2,000 free minutes and killed every
+          # scheduled job on the account. Here it is free.
+          # -m 5 is deliberate: Render starts the instance as soon as the request
+          # reaches its router, so there is no need to wait for the response body
+          # (and no risk of tipping this job over the 60-second billing boundary).
+          curl -m 5 -fsS "${ORCHESTRATOR_URL:-https://clawback-ai-orchestrator.onrender.com}/healthz" -o /dev/null || true
+          node scan.js
