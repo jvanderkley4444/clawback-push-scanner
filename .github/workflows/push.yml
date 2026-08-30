@@ -4,14 +4,19 @@ name: Clawback push (requests + reminders)
 # GitHub cron is best-effort (can run a few min late; scheduled workflows auto-pause
 # after 60 days of repo inactivity — any commit re-arms them). Times are UTC.
 #
-# COST (private repo): GitHub gives 2,000 free Action-minutes/month. Every 30 min =
-# 48 runs/day ≈ 1,440/month; with the npm cache below each run is well under a minute,
-# so this stays comfortably inside the free tier. Firebase stays $0 (Spark + FCM, no
-# Cloud Functions). If you ever want snappier Tap pings, make the repo public (Actions
-# are unlimited for public repos) and drop the cron back to */15.
+# COST: this repo is PUBLIC as of 2026-08-30, so GitHub-hosted standard runners are
+# free and UNLIMITED and the 2,000 min/month allowance no longer applies — exactly
+# the condition the old note named for going back to */15. Done. Firebase stays $0
+# (Spark + FCM, no Cloud Functions).
+#
+# Worth knowing why the allowance mattered: GitHub bills every job rounded UP to a
+# whole minute, so the old note's "well under a minute" reasoning was wrong — a
+# 22-second run still cost a full minute. Together with two keep-warm crons pinging
+# once every 13 minutes, the account hit its cap on 25 Aug and EVERY scheduled job
+# stopped, including Cook with Friends' push, for five days.
 on:
   schedule:
-    - cron: '*/30 * * * *'   # every 30 minutes (private-repo friendly)
+    - cron: '*/15 * * * *'   # every 15 minutes — public repo, unlimited minutes
   workflow_dispatch: {}      # "Run workflow" button for manual/test runs
 
 concurrency:
@@ -20,15 +25,28 @@ concurrency:
 
 jobs:
   push:
-    runs-on: ubuntu-latest
-    timeout-minutes: 8
+    # Pinned, not 'ubuntu-latest': the 6 Aug outage ("The job was not acquired by
+    # Runner of type hosted" + "Internal server error") hit the ubuntu-latest
+    # migration pool. A pinned image is a stabler queue and identical in cost.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5          # a healthy run is ~20 s; past 5 min it is wedged
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'          # cache ~/.npm so installs are fast → fewer billed minutes
+
+      # Cache node_modules ITSELF, not just ~/.npm — on a hit this is a plain
+      # tarball extract and npm never runs at all.
+      - name: Restore node_modules
+        id: modcache
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: nm-${{ runner.os }}-node20-${{ hashFiles('package-lock.json') }}
+
       - name: Install deps
+        if: steps.modcache.outputs.cache-hit != 'true'
         run: npm ci --prefer-offline --no-audit --no-fund || npm install --no-audit --no-fund
       - name: Send request pushes
         env:

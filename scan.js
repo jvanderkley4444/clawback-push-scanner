@@ -35,6 +35,35 @@ function initAdmin() {
   }
 }
 
+// ── Learnings carried over from the cwf-push-scanner rebuild (2026-08-30) ───
+// That scanner went DARK for five days and nobody noticed, because nothing
+// recorded whether it had run. It also re-read a widening window whenever one
+// step failed. Both lessons apply here, plus one this scanner has and that one
+// did not: `trips.get()` is a FULL COLLECTION SCAN on every run, so Firestore
+// reads grow linearly with the number of trips forever.
+const HOUR_MS = 3600000;
+
+// How far back an incremental pass may reach, however long the gap since the
+// last successful run. Bounds a catch-up scan after an outage.
+const MAX_LOOKBACK_MS = (Number(process.env.MAX_LOOKBACK_HOURS) || 72) * HOUR_MS;
+
+// Re-examine a short window before the cursor so a late cron or a little clock
+// skew can't drop an event; pushState de-dupes the overlap.
+const OVERLAP_MS = 5 * 60 * 1000;
+
+// Run an async fn over items with bounded concurrency. The old code awaited a
+// pushState get + an FCM send + a pushState set one event at a time, so a busy
+// trip list ran for minutes of pure round-trip latency.
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async function () {
+    for (let i = next++; i < items.length; i = next++) out[i] = await fn(items[i], i);
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
 function memberById(members, id) { return (members || []).find(m => m && m.id === id) || null; }
 function displayName(members, id) { const m = memberById(members, id); return m ? (m.linkedName || m.name || 'Someone') : 'Someone'; }
 function targetUid(members, id) { const m = memberById(members, id); return (m && m.linkedUid) ? m.linkedUid : null; }
@@ -165,7 +194,36 @@ async function main() {
   const messaging = admin.messaging();
   const now = Date.now();
 
-  const trips = await db.collection('trips').get();
+  // ── Cursor + heartbeat ────────────────────────────────────────────────────
+  // Requests and activity are CHANGE-driven, so they only need trips touched
+  // since the last good run. Reminders are TIME-driven over every still-open
+  // debt, so they must see trips that have not changed at all — those get the
+  // full scan, but only inside the once-a-day REMIND_HOUR window, which turns
+  // ~96 full collection scans a day into ~4.
+  const metaRef = db.collection('pushState').doc('_meta');
+  const meta = await metaRef.get().then(d => (d.exists ? d.data() || {} : {})).catch(() => ({}));
+  const sinceMs = meta.lastOkAt ? Math.max(meta.lastOkAt - OVERLAP_MS, now - MAX_LOOKBACK_MS) : 0;
+  let hadError = false;
+
+  // One phase in isolation: a failure logs, marks hadError (so the cursor is
+  // held and the window retries next run) and never aborts the other phases.
+  async function step(label, fn) {
+    try { return await fn(); }
+    catch (e) { hadError = true; console.error(`[${label}] failed — cursor held, will retry: ${(e && e.message) || e}`); }
+  }
+
+  // sinceMs === 0 means "no cursor yet" (first run after this deploys, or a
+  // wiped _meta) → full scan, exactly the old behaviour. pushState still
+  // de-dupes, so this can never replay a notification that already went out.
+  let incTrips = [];
+  await step('trips_incremental', async () => {
+    incTrips = sinceMs
+      ? (await db.collection('trips').where('updatedAt', '>', admin.firestore.Timestamp.fromMillis(sinceMs)).get()).docs
+      : (await db.collection('trips').get()).docs;
+  });
+  const trips = { docs: incTrips };
+  console.log(`Trips scanned: ${incTrips.length}${sinceMs ? ` (changed since ${new Date(sinceMs).toISOString()})` : ' (full scan — no cursor yet)'}`);
+
   let pushed = 0, candidates = 0;
   for (const doc of trips.docs) {
     const state = (doc.data() || {}).state || {};
@@ -209,7 +267,14 @@ async function main() {
   const inWindow = (remindHour === undefined || remindHour === '') ? true : (new Date(now).getUTCHours() === Number(remindHour));
   let reminded = 0, owers = 0;
   if (inWindow) {
-    for (const doc of trips.docs) {
+    // FULL scan on purpose. A reminder is not triggered by a change — someone who
+    // has owed you money for a week has a trip whose updatedAt has not moved, and
+    // the incremental set above would never surface them. This is the only phase
+    // that needs every trip, and it runs only inside the once-a-day REMIND_HOUR.
+    const allTrips = await step('reminders_scan', async () =>
+      (await db.collection('trips').get()).docs) || [];
+    console.log(`Reminders: full scan of ${allTrips.length} trip(s) (REMIND_HOUR window).`);
+    for (const doc of allTrips) {
       const state = (doc.data() || {}).state || {};
       for (const ev of reminderEventsForTrip(state)) {
         owers++;
@@ -224,9 +289,24 @@ async function main() {
   } else {
     console.log(`Reminders: outside the daily window (REMIND_HOUR=${remindHour} UTC) — skipped.`);
   }
+
+  // ── Heartbeat ─────────────────────────────────────────────────────────────
+  // The cwf scanner was dead for five days before anyone noticed, because
+  // nothing anywhere recorded that it had run. lastRunAt ALWAYS advances, so
+  // "is push alive?" is answerable at a glance; lastOkAt is the cursor and only
+  // moves on a fully clean run, so a failed phase replays its window next time.
+  await metaRef.set({
+    lastRunAt: now,
+    lastOkAt: hadError ? (meta.lastOkAt || null) : now,
+    lastStatus: hadError ? 'partial' : 'ok',
+    lastCounts: { requests: pushed, activity: actPushed, reminders: reminded }
+  }, { merge: true }).catch(() => {});
+  console.log(hadError
+    ? 'Scan finished WITH ERRORS — cursor held, the window retries next run.'
+    : `Scan complete — cursor → ${new Date(now).toISOString()}`);
 }
 
-module.exports = { eventsForTrip, reminderEventsForTrip, activityEventsForTrip, displayName, targetUid, sendToUser, main };
+module.exports = { eventsForTrip, reminderEventsForTrip, activityEventsForTrip, displayName, targetUid, sendToUser, mapLimit, main, MAX_LOOKBACK_MS, OVERLAP_MS };
 
 if (require.main === module) {
   main().then(() => process.exit(0)).catch(err => { console.error('SCAN FAILED:', err); process.exit(1); });

@@ -64,9 +64,8 @@ Request + activity pushes ignore the reminder windows — they go out every run.
 
 ### B. Clawback iOS app — add native Firebase (in `apps/TripwiseApp`)
 3. Add **`GoogleService-Info.plist`** for `clawback-app` to `ios/App/App/`
-   (Firebase console → Project settings → add an **iOS app** with bundle id
-   `com.jeffvanderkley.clawback` → download the plist). *(I can fetch this for you
-   via the CLI — just ask.)*
+   (Firebase console → Project settings → add an **iOS app** using the bundle id
+   from `apps/TripwiseApp/capacitor.config.ts` → download the plist).
 4. In **`ios/App/App/AppDelegate.swift`**: add `import FirebaseCore` and
    `FirebaseApp.configure()` at the top of `didFinishLaunchingWithOptions`, and add
    the **firebase-ios-sdk** Swift Package (FirebaseCore + FirebaseMessaging).
